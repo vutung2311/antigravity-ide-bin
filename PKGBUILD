@@ -1,7 +1,7 @@
 # Maintainer: Mufaro <contact@mufaro.dev>
 pkgname=antigravity-ide-bin
 pkgver=2.5.5.4923483625488384
-pkgrel=3
+pkgrel=5
 pkgdesc="Google Antigravity IDE - AI-powered integrated development environment (Pre-built Binary)"
 arch=('x86_64')
 url="https://antigravity.google/"
@@ -47,7 +47,7 @@ _get_latest_pkg_url() {
     local _page_html _ide_url _js
     # Fetch download page HTML
     _page_html=$(_fetch_url https://antigravity.google/download 2>/dev/null || true)
-    
+
     # 1. Search directly in download page HTML for linux-x64 Antigravity IDE tarball link (excluding hub)
     if [[ -n "$_page_html" ]]; then
         _ide_url=$(echo "$_page_html" | grep -o -E 'https?://[^"'\''>]+/linux-x64/[^"'\''>]+\.tar\.gz' | grep -v 'antigravity-hub' | head -n 1)
@@ -150,22 +150,66 @@ package() {
         ln -sf /usr/bin/antigravity-ide "$pkgdir/opt/antigravity-ide/antigravity-ide"
         install -d "$pkgdir/opt/antigravity-ide/bin"
         ln -sf /usr/bin/antigravity-ide "$pkgdir/opt/antigravity-ide/bin/antigravity-ide"
+        # Generate ES module application bootstrap for system Electron
+        cat > "$pkgdir/opt/antigravity-ide/resources/app/antigravity-ide.js" <<'EOF'
+import { app } from "electron/main";
+import * as path from "node:path";
+import * as fs from "node:fs";
+
+const name = "Antigravity IDE";
+
+// Change command name in /proc/self/comm
+try {
+  const fd = fs.openSync("/proc/self/comm", fs.constants.O_WRONLY);
+  fs.writeSync(fd, "antigravity-ide");
+  fs.closeSync(fd);
+} catch {}
+
+// Remove all extra prefix arguments (electron binary and chromium flags injected by electron wrapper)
+const entryIdx = process.argv.findIndex((arg) => arg.endsWith("/antigravity-ide.js"));
+if (entryIdx >= 0) {
+  process.argv.splice(0, entryIdx);
+}
+
+// Set application paths and identity
+const appPath = import.meta.dirname;
+const packageJson = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url)));
+app.setAppPath(appPath);
+app.setDesktopName("antigravity-ide.desktop");
+app.setName(name);
+app.setPath("userCache", path.join(app.getPath("cache"), name));
+app.setPath("userData", path.join(app.getPath("appData"), name));
+app.setVersion(packageJson.version);
+
+// Run the application
+await import(appPath + "/out/main.js");
+EOF
+
+        # Patch cli.js so that child GUI/diagnostics spawns pass antigravity-ide.js and honor VSCODE_ELECTRON_EXECPATH
+        sed -i 's|r=bl(process\.execPath,E\.slice(2),n);|r=bl((process.env.VSCODE_ELECTRON_EXECPATH\|\|process.execPath),["/opt/antigravity-ide/resources/app/antigravity-ide.js",...E.slice(2)],n);|g' \
+            "$pkgdir/opt/antigravity-ide/resources/app/out/cli.js"
+        grep -Fq "VSCODE_ELECTRON_EXECPATH" "$pkgdir/opt/antigravity-ide/resources/app/out/cli.js" || {
+            error "Failed to patch out/cli.js: target pattern not found in minified bundle"
+            return 1
+        }
     else
         msg2 "Installing full bundled Electron distribution..."
         cp -r "$_app_dir"/* "$pkgdir/opt/antigravity-ide/"
     fi
 
+    # Compatibility symlink for tools (e.g. Cockpit Tools) expecting Debian /usr/share install root
+    install -d "$pkgdir/usr/share"
+    ln -sf /opt/antigravity-ide "$pkgdir/usr/share/antigravity-ide"
+
     install -d "$pkgdir/usr/bin"
 
-    local _electron_bin _cli_target _gui_app
+    local _electron_bin _cli_target
     if [[ "$_use_system_electron" == "true" ]]; then
         _electron_bin="/usr/bin/$_electron_pkg"
         _cli_target="/usr/lib/$_electron_pkg/electron"
-        _gui_app="/opt/antigravity-ide/resources/app/"
     else
         _electron_bin="/opt/antigravity-ide/antigravity-ide"
         _cli_target="/opt/antigravity-ide/antigravity-ide"
-        _gui_app=""
     fi
 
     # Create a bash wrapper script that launches the prebuilt binary or system electron
@@ -188,7 +232,7 @@ _flags_file="\${XDG_CONFIG_HOME:-\$HOME/.config}/antigravity-ide-flags.conf"
 if [[ -f "\${_flags_file}" ]]; then
     while IFS= read -r line; do
         [[ "\${line}" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "\${line}" ]] && continue
+        [[ "\${line}" =~ ^[[:space:]]*$ ]] && continue
         codeflags+=("\${line}")
     done < "\${_flags_file}"
 fi
@@ -202,6 +246,8 @@ if ! command -v "$_electron_pkg" >/dev/null 2>&1; then
     echo "Please install it using: pacman -S $_electron_pkg" >&2
     exit 1
 fi
+
+export VSCODE_ELECTRON_EXECPATH="$_electron_bin"
 WRAPPER
     fi
 
@@ -214,7 +260,7 @@ _cleanup_antigravity_processes() {
     # 2. chrome_crashpad_handler configured for Antigravity IDE
     # 3. Antigravity IDE Electron/utility processes (matching /opt/antigravity-ide or user-data-dir)
     local roots
-    roots=\$(pgrep -u "\$UID" -f "language_server_linux_x64|chrome_crashpad_handler.*Antigravity IDE|/opt/antigravity-ide|--user-data-dir=.*Antigravity IDE" 2>/dev/null | grep -vw "\$my_pid" || true)
+    roots=\$(pgrep -u "\$UID" -f "electron.*[ /]opt/antigravity-ide|/opt/antigravity-ide/antigravity-ide|/opt/antigravity-ide/resources/app/extensions/antigravity/bin/language_server_linux_x64|chrome_crashpad_handler.*Antigravity IDE|--user-data-dir=.*Antigravity IDE" 2>/dev/null | grep -vw "\$my_pid" || true)
 
     if [[ -n "\$roots" ]]; then
         # Recursively collect all descendant processes (e.g. MCP servers, language workers, child shells)
@@ -228,7 +274,7 @@ _cleanup_antigravity_processes() {
                 parent[\$1] = \$2
                 children[\$2] = children[\$2] " " \$1
             }
-            function walk(p) {
+            function walk(p,    arr, i) {
                 split(children[p], arr, " ")
                 for (i in arr) {
                     if (arr[i] != "" && !(arr[i] in visited)) {
@@ -256,9 +302,14 @@ _cleanup_antigravity_processes() {
             # Wait up to 2.5s for graceful process termination
             local deadline=\$((SECONDS + 3))
             while (( SECONDS < deadline )); do
-                local alive
-                alive=\$(pgrep -u "\$UID" -f "language_server_linux_x64|chrome_crashpad_handler.*Antigravity IDE|/opt/antigravity-ide|--user-data-dir=.*Antigravity IDE" 2>/dev/null | grep -vw "\$my_pid" || true)
-                [[ -z "\$alive" ]] && break
+                local any_alive=false
+                for p in \$pids; do
+                    if kill -0 "\$p" 2>/dev/null; then
+                        any_alive=true
+                        break
+                    fi
+                done
+                [[ "\$any_alive" == "false" ]] && break
                 sleep 0.2
             done
 
@@ -293,7 +344,7 @@ _is_main_gui_running() {
     fi
     # Check if main Electron window process is still active (excluding zygotes, utilities, extensions, subshells)
     local my_pid="\$\$"
-    if pgrep -u "\$UID" -f "electron.*[ /]opt/antigravity-ide/resources/app|/opt/antigravity-ide/antigravity-ide" -a 2>/dev/null | grep -v -- "--type=" | grep -v "/extensions/" | grep -vw "\$my_pid" | grep -q .; then
+    if pgrep -u "\$UID" -f "electron.*[ /]opt/antigravity-ide|/opt/antigravity-ide/antigravity-ide" -a 2>/dev/null | grep -v -- "--type=" | grep -v "/extensions/" | grep -vw "\$my_pid" | grep -q .; then
         return 0
     fi
     return 1
@@ -311,78 +362,68 @@ for arg in "\$@"; do
     esac
 done
 
-# Classify invocation: CLI query/management, interactive foreground, or background GUI
-_wait=false
-_cli_node=false
+# Detect protocol URLs (e.g. antigravity-ide://auth-success) and ensure --open-url is passed
+_has_open_url=false
+_has_protocol_url=false
+for arg in "\$@"; do
+    if [[ "\$arg" == "--open-url" ]]; then
+        _has_open_url=true
+        break
+    elif [[ "\$arg" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// && "\$arg" != file://* ]]; then
+        _has_protocol_url=true
+    fi
+done
 
+if [[ "\$_has_open_url" == "false" && "\$_has_protocol_url" == "true" ]]; then
+    set -- --open-url "\$@"
+fi
+
+_is_cli_only=false
 for arg in "\$@"; do
     case "\$arg" in
         -h|--help|-v|--version|-s|--status|--list-extensions*|--show-versions|--category*|\
         --install-extension*|--uninstall-extension*|--update-extensions*|--locate-shell-integration-path*|\
-        --telemetry|--add-mcp*)
-            _cli_node=true
-            _wait=true
-            break
-            ;;
         chat|serve-web|tunnel)
-            _cli_node=true
-            _wait=true
-            break
-            ;;
-        -w|--wait|--verbose|-|--diff|-d|--merge|-m)
-            _wait=true
+            _is_cli_only=true
             break
             ;;
     esac
 done
 
-_cli_args=("/opt/antigravity-ide/resources/app/out/cli.js")
-
-_electron_args=()
-if (( \${#codeflags[@]} > 0 )); then
-    _electron_args+=("\${codeflags[@]}")
-fi
-if [[ -n "$_gui_app" ]]; then
-    _electron_args+=("$_gui_app")
-fi
-
-# 1. If an instance is already running, forward all invocations via CLI IPC
+_was_running=false
 if _is_main_gui_running; then
-    ELECTRON_RUN_AS_NODE=1 exec "$_cli_target" "\${_cli_args[@]}" "\$@"
+    _was_running=true
 fi
 
-# 2. If no instance is running and it is a CLI query/management command, run via node CLI
-if [[ "\$_cli_node" == "true" ]]; then
-    ELECTRON_RUN_AS_NODE=1 exec "$_cli_target" "\${_cli_args[@]}" "\$@"
+# Spawn detached background lifecycle supervisor if this is a new GUI session
+if [[ "\$_was_running" == "false" && "\$_is_cli_only" == "false" ]]; then
+    (
+        trap "" HUP
+        # Wait up to 10s for the primary window to appear
+        for _ in {1..50}; do
+            _is_main_gui_running && break
+            sleep 0.2
+        done
+        # If the GUI started, monitor it until all windows close
+        if _is_main_gui_running; then
+            while _is_main_gui_running; do
+                sleep 2
+            done
+            # Wait grace period after windows close to allow normal shutdown
+            sleep 2
+            # Re-verify that no new GUI instance was opened during the grace period
+            if ! _is_main_gui_running; then
+                _cleanup_antigravity_processes
+            fi
+        fi
+    ) </dev/null >/dev/null 2>&1 &
 fi
 
-# 3. If no instance is running and foreground wait is requested, run in foreground
-if [[ "\$_wait" == "true" ]]; then
-    _cleanup_antigravity_processes
-    "$_electron_bin" "\${_electron_args[@]}" "\$@"
-    _ret=\$?
-    _cleanup_antigravity_processes
-    exit "\$_ret"
-fi
-
-# 4. Otherwise, launch a fresh primary GUI instance in the background
-_cleanup_antigravity_processes
-
-nohup "$_electron_bin" "\${_electron_args[@]}" "\$@" >/dev/null 2>&1 &
-_main_pid=\$!
-
-# Detach a background monitor to ensure clean process teardown when the IDE exits
-(
-    trap "" HUP
-    tail --pid="\$_main_pid" -f /dev/null 2>/dev/null || wait "\$_main_pid" 2>/dev/null || true
-    sleep 1
-    if ! _is_main_gui_running; then
-        _cleanup_antigravity_processes
-    fi
-) >/dev/null 2>&1 & disown
+ELECTRON_RUN_AS_NODE=1 exec "$_cli_target" "/opt/antigravity-ide/resources/app/out/cli.js" "\$@" "\${codeflags[@]}"
 WRAPPER
 
     chmod +x "$pkgdir/usr/bin/antigravity-ide"
+    ln -sf antigravity-ide "$pkgdir/usr/bin/antigravity-ide-bin"
 
     # Install the application icon
     msg2 "Installing application icon..."
@@ -400,7 +441,7 @@ WRAPPER
             "$pkgdir/usr/share/zsh/site-functions/_antigravity-ide"
     fi
 
-    # Install desktop entry
+    # Install desktop entry and URL handler entry
     install -d "$pkgdir/usr/share/applications"
     cat > "$pkgdir/usr/share/applications/antigravity-ide.desktop" <<EOF
 [Desktop Entry]
@@ -411,13 +452,28 @@ Exec=/usr/bin/antigravity-ide %F
 Icon=antigravity-ide
 Categories=Development;IDE;
 StartupWMClass=antigravity-ide
-MimeType=x-scheme-handler/antigravity-ide;inode/directory;text/plain;
+MimeType=inode/directory;text/plain;
 Actions=new-empty-window;
-X-KDE-Protocols=antigravity-ide;
+Keywords=antigravity;antigravity-ide;
 
 [Desktop Action new-empty-window]
 Name=New Empty Window
 Exec=/usr/bin/antigravity-ide --new-window %F
 Icon=antigravity-ide
+EOF
+
+    cat > "$pkgdir/usr/share/applications/antigravity-ide-url-handler.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Antigravity IDE - URL Handler
+Comment=Antigravity IDE URL Handler
+Exec=/usr/bin/antigravity-ide --open-url %U
+Icon=antigravity-ide
+NoDisplay=true
+StartupWMClass=antigravity-ide
+Categories=Development;IDE;
+MimeType=x-scheme-handler/antigravity-ide;
+Keywords=antigravity;antigravity-ide;
+X-KDE-Protocols=antigravity-ide;
 EOF
 }
