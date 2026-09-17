@@ -1,7 +1,7 @@
 pkgbase = antigravity-ide-bin
 	pkgdesc = Google Antigravity IDE - AI-powered integrated development environment (Pre-built Binary)
 	pkgver = 2.5.5.4923483625488384
-	pkgrel = 3
+	pkgrel = 5
 	url = https://antigravity.google/
 	arch = x86_64
 	license = Proprietary
