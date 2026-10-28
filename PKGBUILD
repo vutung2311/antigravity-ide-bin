@@ -1,7 +1,7 @@
 # Maintainer: Mufaro <contact@mufaro.dev>
 pkgname=antigravity-ide-bin
-pkgver=2.5.5.4923483625488384
-pkgrel=5
+pkgver=2.6.0.5526304964083712
+pkgrel=1
 pkgdesc="Google Antigravity IDE - AI-powered integrated development environment (Pre-built Binary)"
 arch=('x86_64')
 url="https://antigravity.google/"
@@ -187,7 +187,7 @@ await import(appPath + "/out/main.js");
 EOF
 
         # Patch cli.js so that child GUI/diagnostics spawns pass antigravity-ide.js and honor VSCODE_ELECTRON_EXECPATH
-        sed -i 's|r=bl(process\.execPath,E\.slice(2),n);|r=bl((process.env.VSCODE_ELECTRON_EXECPATH\|\|process.execPath),["/opt/antigravity-ide/resources/app/antigravity-ide.js",...E.slice(2)],n);|g' \
+        sed -E -i 's@([a-zA-Z0-9_$]+)[[:space:]]*=[[:space:]]*([a-zA-Z0-9_$]+)\(process\.execPath,[[:space:]]*([a-zA-Z0-9_$]+)\.slice\(2\),[[:space:]]*([a-zA-Z0-9_$]+)\);@\1=\2((process.env.VSCODE_ELECTRON_EXECPATH||process.execPath),["/opt/antigravity-ide/resources/app/antigravity-ide.js",...\3.slice(2)],\4);@g' \
             "$pkgdir/opt/antigravity-ide/resources/app/out/cli.js"
         grep -Fq "VSCODE_ELECTRON_EXECPATH" "$pkgdir/opt/antigravity-ide/resources/app/out/cli.js" || {
             error "Failed to patch out/cli.js: target pattern not found in minified bundle"
